@@ -1,0 +1,5 @@
+(library
+ ((name        ppx_optional)
+  (public_name ppx_optional)
+  (libraries (compiler-libs.common ppx_core ppx_driver))
+  (preprocess metaquot)))
