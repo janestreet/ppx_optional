@@ -1,10 +1,5 @@
-open! StdLabels
-open Ppx_core.Std
-open Parsetree
-open Asttypes
+open Ppx_core
 open Ast_builder.Default
-
-[@@@metaloc loc]
 
 let explode_tuple_expr = function
   | { pexp_desc = Pexp_tuple exp_list; pexp_attributes = attrs; _ } ->
