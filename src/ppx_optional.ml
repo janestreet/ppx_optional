@@ -107,7 +107,7 @@ let expand_match ~loc:_ ~path:_ e =
       | [] -> []
       | pattern :: ps ->
         match variable_binding_for_pattern ~i pattern with
-        | None -> loop i ps
+        | None -> loop (i + 1) ps
         | Some vb -> vb :: loop (i + 1) ps
     in
     loop 0 ps
