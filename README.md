@@ -1,7 +1,5 @@
----
-title: ppx_optional - match statements for zero-alloc options
-parent: ../README.md
----
+ppx_optional - match statements for zero-alloc options
+======================================================
 
 A ppx rewriter that rewrites simple match statements with an if then
 else expression.
