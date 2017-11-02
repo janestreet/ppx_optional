@@ -6,6 +6,18 @@ let assert_no_guard = function
   | Some guard ->
     Location.raise_errorf ~loc:guard.pexp_loc "guards are not supported in [%%optional ]"
 
+let rec assert_binder pat =
+  match pat.ppat_desc with
+  | Ppat_constraint (pat, _) ->
+    (* Allow "Some (_ : typ)" *)
+    assert_binder pat
+  | Ppat_var _
+  | Ppat_any ->
+    ()
+  | _ ->
+    Location.raise_errorf ~loc:pat.ppat_loc
+      "sub patterns are restricted to variable names and wildcards"
+
 let disable_exhaustivity_warning e =
   let attr =
     let loc = Location.none in
@@ -23,6 +35,7 @@ let get_pattern_and_binding i pattern =
   let pat, binding_opt =
     match pattern with
     | [%pat? Some [%p? x]] ->
+      assert_binder x;
       let binding =
         value_binding ~loc ~pat:x
           ~expr:(eapply ~loc [%expr Optional_syntax.unchecked_value] [evar ~loc i])
