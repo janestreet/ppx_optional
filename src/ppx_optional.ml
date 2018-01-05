@@ -38,7 +38,7 @@ let get_pattern_and_binding i pattern =
       assert_binder x;
       let binding =
         value_binding ~loc ~pat:x
-          ~expr:(eapply ~loc [%expr Optional_syntax.unchecked_value] [evar ~loc i])
+          ~expr:(eapply ~loc [%expr Optional_syntax.unsafe_value] [evar ~loc i])
       in
       [%pat? false], Some binding
     | [%pat? None] -> [%pat? true], None
@@ -106,7 +106,7 @@ let fake_match ~match_loc matched_expr cases =
          (* This code will never be executed, it is just here so the type checker
             generates nice error messages. *)
         if Optional_syntax.is_none [%e expr] then None
-        else Some (Optional_syntax.unchecked_value [%e expr])
+        else Some (Optional_syntax.unsafe_value [%e expr])
       ]
     )
   in
