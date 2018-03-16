@@ -2,8 +2,8 @@
  ((name        ppx_optional)
   (public_name ppx_optional)
   (flags (:standard -safe-string))
-  (libraries (ppx_core ppx_driver))
-  (preprocess (pps (ppx_metaquot ppx_driver.runner)))))
+  (libraries (base ppxlib))
+  (preprocess (pps (ppxlib.metaquot ppxlib.runner)))))
 
 
 (jbuild_version 1)

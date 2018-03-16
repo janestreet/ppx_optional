@@ -1,4 +1,5 @@
-open Ppx_core
+open Base
+open Ppxlib
 open Ast_builder.Default
 
 let assert_no_guard = function
@@ -151,5 +152,5 @@ let optional =
     expand_match
 
 let () =
-  Ppx_driver.register_transformation "optional"
+  Driver.register_transformation "optional"
     ~extensions:[ optional ]
