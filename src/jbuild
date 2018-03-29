@@ -1,7 +1,6 @@
 (library
  ((name        ppx_optional)
   (public_name ppx_optional)
-  (flags (:standard -safe-string))
   (libraries (base ppxlib))
   (preprocess (pps (ppxlib.metaquot ppxlib.runner)))))
 
