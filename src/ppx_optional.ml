@@ -22,8 +22,10 @@ let rec assert_binder pat =
 let disable_exhaustivity_warning e =
   let attr =
     let loc = Location.none in
-    { Location. loc; txt = "ocaml.warning" },
-    PStr [ pstr_eval ~loc (estring ~loc "-8") [] ]
+    attribute
+      ~loc
+      ~name:({ Location. loc; txt = "ocaml.warning" })
+      ~payload:(PStr [ pstr_eval ~loc (estring ~loc "-8") [] ])
   in
   { e with pexp_attributes = attr :: e.pexp_attributes }
 
@@ -38,7 +40,7 @@ let get_pattern_and_binding i pattern =
     | [%pat? Some [%p? x]] ->
       assert_binder x;
       let binding =
-        value_binding ~loc ~pat:x
+        value_binding ~loc ~pat:[%pat? ([%p x] : _)]
           ~expr:(eapply ~loc [%expr Optional_syntax.unsafe_value] [evar ~loc i])
       in
       [%pat? false], Some binding
