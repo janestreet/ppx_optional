@@ -2,6 +2,20 @@ open Base
 open Ppxlib
 open Ast_builder.Default
 
+let optional_syntax_str = "Optional_syntax"
+
+let optional_syntax ~modul : Longident.t =
+  match modul with
+  | None -> Lident optional_syntax_str
+  | Some id -> Ldot (Ldot (id.txt, optional_syntax_str), optional_syntax_str)
+
+let eoperator ~loc ~modul func =
+  let lid : Longident.t = Ldot (optional_syntax ~modul, func) in
+  pexp_ident ~loc (Located.mk ~loc lid)
+
+let eunsafe_value = eoperator "unsafe_value"
+let eis_none = eoperator "is_none"
+
 let assert_no_guard = function
   | None -> ()
   | Some guard ->
@@ -33,7 +47,7 @@ let varname i = Printf.sprintf "__ppx_optional_e_%i" i
 let evar ~loc i = evar ~loc (varname i)
 let pvar ~loc i = pvar ~loc (varname i)
 
-let get_pattern_and_binding i pattern =
+let get_pattern_and_binding ~modul i pattern =
   let loc = pattern.ppat_loc in
   let pat, binding_opt =
     match pattern with
@@ -41,7 +55,7 @@ let get_pattern_and_binding i pattern =
       assert_binder x;
       let binding =
         value_binding ~loc ~pat:[%pat? ([%p x] : _)]
-          ~expr:(eapply ~loc [%expr Optional_syntax.unsafe_value] [evar ~loc i])
+          ~expr:(eapply ~loc (eunsafe_value ~loc ~modul) [evar ~loc i])
       in
       [%pat? false], Some binding
     | [%pat? None] -> [%pat? true], None
@@ -55,8 +69,9 @@ let get_pattern_and_binding i pattern =
   { pattern with ppat_desc = pat.ppat_desc }, binding_opt
 
 
-let rewrite_case ~match_loc { pc_lhs = pat; pc_rhs = body; pc_guard } =
+let rewrite_case ~match_loc ~modul { pc_lhs = pat; pc_rhs = body; pc_guard } =
   assert_no_guard pc_guard;
+  let get_pattern_and_binding = get_pattern_and_binding ~modul in
   let ppat_desc, bindings =
     match pat.ppat_desc with
     | Ppat_tuple patts ->
@@ -89,27 +104,27 @@ let rewrite_matched_expr ~wrapper expr =
   in
   { expr with pexp_desc }
 
-let real_match ~match_loc matched_expr cases =
+let real_match ~match_loc ~modul matched_expr cases =
   let matched_expr =
     rewrite_matched_expr matched_expr ~wrapper:(fun expr ->
       let loc = expr.pexp_loc in
-      eapply ~loc [%expr Optional_syntax.is_none] [expr]
+      eapply ~loc (eis_none ~loc ~modul) [expr]
     )
   in
-  let cases = List.map cases ~f:(rewrite_case ~match_loc) in
+  let cases = List.map cases ~f:(rewrite_case ~match_loc ~modul) in
   (* we can disable the warning here as we rely on the other match we generate for
      error messages. *)
   disable_exhaustivity_warning (pexp_match ~loc:match_loc matched_expr cases)
 
-let fake_match ~match_loc matched_expr cases =
+let fake_match ~match_loc ~modul matched_expr cases =
   let matched_expr =
     rewrite_matched_expr matched_expr ~wrapper:(fun expr ->
       let loc = expr.pexp_loc in
       [%expr
          (* This code will never be executed, it is just here so the type checker
             generates nice error messages. *)
-        if Optional_syntax.is_none [%e expr] then None
-        else Some (Optional_syntax.unsafe_value [%e expr])
+        if [%e eis_none ~loc ~modul] [%e expr] then None
+        else Some ([%e eunsafe_value ~loc ~modul] [%e expr])
       ]
     )
   in
@@ -124,16 +139,16 @@ let bindings_for_matched_expr matched_expr =
   | Pexp_tuple exprs -> List.mapi exprs ~f:bind
   | _ -> [bind 0 matched_expr]
 
-let expand_match ~match_loc matched_expr cases =
+let expand_match ~match_loc ~modul matched_expr cases =
   let fake_match =
     (* The types in this branch actually match what the user would expect given the source
        code, so we tell merlin to do all its work in here. *)
-    Merlin_helpers.focus_expression (fake_match ~match_loc matched_expr cases)
+    Merlin_helpers.focus_expression (fake_match ~match_loc ~modul matched_expr cases)
   in
   let real_match =
     (* The types here actually have nothing to do with what's in the source ([bool]
        appears for example), so we tell merlin to avoid that branch. *)
-    Merlin_helpers.hide_expression (real_match ~match_loc matched_expr cases)
+    Merlin_helpers.hide_expression (real_match ~match_loc ~modul matched_expr cases)
   in
   let bindings = bindings_for_matched_expr matched_expr in
   let loc = match_loc in
@@ -143,13 +158,13 @@ let expand_match ~match_loc matched_expr cases =
 (* We add the indirection instead of directly matching on [pexp_match] when declaring the
    extension because we want more informative error messages than "Extension was not
    translated". *)
-let expand_match ~loc ~path:_ e =
+let expand_match ~loc ~path:_ ~arg:modul e =
   Ast_pattern.parse Ast_pattern.(pexp_match __ __) loc e ~on_error:(fun () ->
     Location.raise_errorf ~loc "[%%optional ] must apply to a match statement"
-  ) (expand_match ~match_loc:e.pexp_loc)
+  ) (expand_match ~match_loc:e.pexp_loc ~modul)
 
 let optional =
-  Extension.declare "optional" Extension.Context.expression
+  Extension.declare_with_path_arg "optional" Extension.Context.expression
     Ast_pattern.(single_expr_payload __)
     expand_match
 
