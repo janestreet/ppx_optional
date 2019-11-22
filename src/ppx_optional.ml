@@ -4,7 +4,7 @@ open Ast_builder.Default
 
 (* The scope in which to find [Optional_syntax]. [From_module] means using
    module.Optional_syntax.Optional_syntax *)
-type module_scope = 
+type module_scope =
   | Use_optional_syntax
   | Use_optional_syntax_optional_syntax
   | From_module of longident loc
@@ -79,11 +79,6 @@ let eoperator ~loc ~module_ func =
 let eunsafe_value = eoperator "unsafe_value"
 let eis_none = eoperator "is_none"
 
-let assert_no_guard = function
-  | None -> ()
-  | Some guard ->
-    Location.raise_errorf ~loc:guard.pexp_loc "guards are not supported in [%%optional ]"
-
 let rec assert_binder pat =
   match pat.ppat_desc with
   | Ppat_constraint (pat, _) ->
@@ -96,13 +91,13 @@ let rec assert_binder pat =
     Location.raise_errorf ~loc:pat.ppat_loc
       "sub patterns are restricted to variable names and wildcards"
 
-let disable_exhaustivity_warning e =
+let disable_all_warnings e =
   let attr =
     let loc = Location.none in
     attribute
       ~loc
       ~name:({ Location. loc; txt = "ocaml.warning" })
-      ~payload:(PStr [ pstr_eval ~loc (estring ~loc "-8") [] ])
+      ~payload:(PStr [ pstr_eval ~loc (estring ~loc "-a") [] ])
   in
   { e with pexp_attributes = attr :: e.pexp_attributes }
 
@@ -134,11 +129,10 @@ let get_pattern_and_binding ~module_ i pattern =
 let rewrite_case ~match_loc ~modules ~default_module
       { pc_lhs = pat; pc_rhs = body; pc_guard }
   =
-  assert_no_guard pc_guard;
   let modules_array = Array.of_list modules in
   let get_module i =
     (* Sadly, we need to be able to handle the case when the length of the matched
-       expression doesn't equal the length of the case, in order to produce useful 
+       expression doesn't equal the length of the case, in order to produce useful
        error messages (with the proper types). *)
     if i < Array.length modules_array
     then modules_array.(i)
@@ -163,10 +157,15 @@ let rewrite_case ~match_loc ~modules ~default_module
       pat.ppat_desc, Option.to_list binding_opt
   in
   let pc_lhs = { pat with ppat_desc } in
-  let pc_rhs =
+  let pc_rhs, pc_guard =
     match bindings with
-    | [] -> body
-    | _  -> pexp_let ~loc:match_loc Nonrecursive bindings body
+    | [] -> body, pc_guard
+    | _  ->
+      pexp_let ~loc:match_loc Nonrecursive bindings body
+    , Option.map pc_guard
+        ~f:(fun pc_guard ->
+          pexp_let ~loc:pc_guard.pexp_loc Nonrecursive bindings pc_guard
+        )
   in
   { pc_lhs; pc_rhs; pc_guard }
 
@@ -196,12 +195,12 @@ let real_match t =
   in
   let modules = List.map t.elements ~f:(fun { module_ ; _} -> module_) in
   let cases =
-    List.map t.cases 
+    List.map t.cases
       ~f:(rewrite_case ~match_loc:t.match_loc ~modules ~default_module:t.default_module)
   in
   (* we can disable the warning here as we rely on the other match we generate for
      error messages. *)
-  disable_exhaustivity_warning (pexp_match ~loc:t.match_loc new_matched_expr cases)
+  disable_all_warnings (pexp_match ~loc:t.match_loc new_matched_expr cases)
 
 let fake_match t =
   let new_matched_expr =
