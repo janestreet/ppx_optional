@@ -173,15 +173,16 @@ let rewrite_case
     We do keep the location of the initial component for the new one. *)
 let rewrite_matched_expr t ~wrapper =
   let subst_and_wrap i { Matched_expression_element.module_; exp } =
-    let loc = exp.pexp_loc in
-    { (wrapper ~module_ (evar ~loc i)) with pexp_loc = loc }
+    let loc = { exp.pexp_loc with loc_ghost = true } in
+    wrapper ~module_ (evar ~loc i)
   in
   let pexp_desc =
     match t.elements with
     | [ singleton ] -> (subst_and_wrap 0 singleton).pexp_desc
     | list -> Pexp_tuple (List.mapi list ~f:subst_and_wrap)
   in
-  { t.original_matched_expr with pexp_desc }
+  let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
+  { t.original_matched_expr with pexp_desc; pexp_loc }
 ;;
 
 let real_match t =
@@ -212,12 +213,12 @@ let fake_match t =
         then None
         else Some ([%e eunsafe_value ~loc ~module_] [%e expr])])
   in
-  pexp_match ~loc:t.match_loc new_matched_expr t.cases
+  pexp_match ~loc:{ t.match_loc with loc_ghost = true } new_matched_expr t.cases
 ;;
 
 let bindings_for_matched_expr matched_expr =
   let bind i expr =
-    let loc = expr.pexp_loc in
+    let loc = { expr.pexp_loc with loc_ghost = true } in
     value_binding ~loc ~pat:(pvar ~loc i) ~expr
   in
   List.mapi matched_expr ~f:(fun i { Matched_expression_element.exp; _ } -> bind i exp)
@@ -243,7 +244,7 @@ let expand_match ~match_loc ~(module_ : longident loc option) matched_expr cases
     Merlin_helpers.hide_expression (real_match t)
   in
   let bindings = bindings_for_matched_expr t.elements in
-  let loc = match_loc in
+  let loc = { match_loc with loc_ghost = true } in
   pexp_let
     ~loc
     Nonrecursive
