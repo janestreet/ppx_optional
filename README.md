@@ -30,6 +30,16 @@ end else begin
 end
 ```
 
+Another example with multiple values and inline getting `Optional_syntax` in scope:
+
+```ocaml
+match%optional.Price_float.Option a, b with
+| None, None -> expression_a
+| Some a, None -> expression_b
+| None, Some b -> expression_c
+| Some a, Some b -> expression_d
+```
+
 Usage
 -----
 
@@ -37,4 +47,3 @@ This is normally used to safely access an optional value while
 avoiding allocation for immediate values
 (e.g. `Immediate.{Char,Bool,Int}.Option`, `Fixed.Option`,
 `Price.Fixed.Option`, etc...).
-
