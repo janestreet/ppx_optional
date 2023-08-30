@@ -139,10 +139,10 @@ let get_pattern_and_bindings ~module_ i pattern =
 ;;
 
 let rewrite_case
-      ~match_loc
-      ~modules
-      ~default_module
-      { pc_lhs = pat; pc_rhs = body; pc_guard }
+  ~match_loc
+  ~modules
+  ~default_module
+  { pc_lhs = pat; pc_rhs = body; pc_guard }
   =
   let modules_array = Array.of_list modules in
   let get_module i =
@@ -364,7 +364,7 @@ let fake_match t =
       let loc = expr.pexp_loc in
       let fake_option =
         [%expr
-           (* This code will never be executed, it is just here so the type checker
+          (* This code will never be executed, it is just here so the type checker
               generates nice error messages. *)
           if [%e eis_none ~loc ~module_] [%e expr]
           then None
