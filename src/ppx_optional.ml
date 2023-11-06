@@ -127,6 +127,16 @@ let get_pattern_and_bindings ~module_ i pattern =
       [%pat? false], binding :: bindings
     | [%pat? None] -> [%pat? true], bindings
     | [%pat? _] -> pat, bindings
+    | [%pat? [%p? l] | [%p? r]] ->
+      (* At this scope, we're considering a single optional value, so all option bindings
+         must be the same option, and all value bindings must be the same value. The fake
+         match will cause the compiler to complain if both sides of the pattern do not
+         bind the same values, or bind them with different types. So we can safely ignore
+         one set of bindings here, as we know the other set must be equivalent. *)
+      let l, bindings = loop l bindings
+      and r, (_ : value_binding list) = loop r bindings in
+      (* N.b. this could be [%pat? [%p l] | [%p r]] but it breaks ocamlformat. *)
+      { pat with ppat_desc = Ppat_or (l, r) }, bindings
     | _ ->
       Location.raise_errorf
         ~loc:pat.ppat_loc
@@ -138,49 +148,72 @@ let get_pattern_and_bindings ~module_ i pattern =
   { pattern with ppat_desc }, bindings
 ;;
 
-let rewrite_case
+let rec rewrite_case
   ~match_loc
-  ~modules
+  ~modules_array
   ~default_module
   { pc_lhs = pat; pc_rhs = body; pc_guard }
   =
-  let modules_array = Array.of_list modules in
   let get_module i =
     (* Sadly, we need to be able to handle the case when the length of the matched
        expression doesn't equal the length of the case, in order to produce useful
        error messages (with the proper types). *)
     if i < Array.length modules_array then modules_array.(i) else default_module
   in
-  let ppat_desc, bindings =
-    match pat.ppat_desc with
-    | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
-      Location.raise_errorf
-        ~loc:pat.ppat_loc
-        "this pattern would bind a tuple to the variable %s, which is unsupported in \
-         [%%optional ]"
-        x.txt
-    | Ppat_tuple patts ->
-      let patts, bindings =
-        List.mapi patts ~f:(fun i patt ->
-          let module_ = get_module i in
-          get_pattern_and_bindings ~module_ i patt)
-        |> List.unzip
-      in
-      Ppat_tuple patts, List.concat bindings
-    | _ ->
-      let pat, bindings = get_pattern_and_bindings 0 pat ~module_:(List.hd_exn modules) in
-      pat.ppat_desc, bindings
+  let single_pattern ~ppat_desc ~bindings =
+    let pc_lhs = { pat with ppat_desc } in
+    let pc_rhs, pc_guard =
+      match bindings with
+      | [] -> body, pc_guard
+      | _ :: _ ->
+        ( pexp_let ~loc:match_loc Nonrecursive bindings body
+        , Option.map pc_guard ~f:(fun pc_guard ->
+            pexp_let ~loc:pc_guard.pexp_loc Nonrecursive bindings pc_guard) )
+    in
+    [ { pc_lhs; pc_rhs; pc_guard } ]
   in
-  let pc_lhs = { pat with ppat_desc } in
-  let pc_rhs, pc_guard =
-    match bindings with
-    | [] -> body, pc_guard
-    | _ ->
-      ( pexp_let ~loc:match_loc Nonrecursive bindings body
-      , Option.map pc_guard ~f:(fun pc_guard ->
-          pexp_let ~loc:pc_guard.pexp_loc Nonrecursive bindings pc_guard) )
-  in
-  { pc_lhs; pc_rhs; pc_guard }
+  match pat.ppat_desc with
+  | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
+    Location.raise_errorf
+      ~loc:pat.ppat_loc
+      "this pattern would bind a tuple to the variable %s, which is unsupported in \
+       [%%optional ]"
+      x.txt
+  | Ppat_or (pat1, pat2) ->
+    (* Just turn disjunctions into a list of individual cases with identical rhs
+       expressions and guards. The OCaml manual explicitly says they are evaluated and
+       bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
+
+       If the rhs expression is a lot of code, this could potentially blow up binary size,
+       slow down compilation, and/or hurt performance due to cache locality. But we didn't
+       support or-patterns for a long time, so most code already just duplicates the rhs,
+       and this is much easier than generating an actual or-pattern with correct bindings.
+       We can implement that instead if the need arises in the future.
+
+       If there is a [when]-guard, it is possible for it to be evaluated more times than
+       it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
+       "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
+    rewrite_case
+      ~match_loc
+      ~modules_array
+      ~default_module
+      { pc_lhs = pat1; pc_rhs = body; pc_guard }
+    @ rewrite_case
+        ~match_loc
+        ~modules_array
+        ~default_module
+        { pc_lhs = pat2; pc_rhs = body; pc_guard }
+  | Ppat_tuple patts ->
+    let patts, bindings =
+      List.mapi patts ~f:(fun i patt ->
+        let module_ = get_module i in
+        get_pattern_and_bindings ~module_ i patt)
+      |> List.unzip
+    in
+    single_pattern ~ppat_desc:(Ppat_tuple patts) ~bindings:(List.concat bindings)
+  | _ ->
+    let pat, bindings = get_pattern_and_bindings 0 pat ~module_:modules_array.(0) in
+    single_pattern ~ppat_desc:pat.ppat_desc ~bindings
 ;;
 
 (** Take the matched expression and replace all its components by a variable, which will
@@ -208,14 +241,47 @@ let real_match t =
   in
   let modules = List.map t.elements ~f:(fun { module_; _ } -> module_) in
   let cases =
-    List.map
+    List.concat_map
       t.cases
-      ~f:(rewrite_case ~match_loc:t.match_loc ~modules ~default_module:t.default_module)
+      ~f:
+        (rewrite_case
+           ~match_loc:t.match_loc
+           ~modules_array:(Array.of_list modules)
+           ~default_module:t.default_module)
   in
   (* we can disable the warning here as we rely on the other match we generate for
      error messages. *)
   disable_all_warnings (pexp_match ~loc:t.match_loc new_matched_expr cases)
 ;;
+
+(* Represents the structure of or-patterns. *)
+module Disjunction_tree = struct
+  type 'a t =
+    | Leaf of
+        { pattern : pattern
+        ; a : 'a
+        }
+    | Node of
+        { pattern : pattern
+        ; l : 'a t
+        ; r : 'a t
+        }
+
+  let rec iter t ~f =
+    match t with
+    | Leaf { pattern = _; a } -> f a
+    | Node { pattern = _; l; r } ->
+      iter l ~f;
+      iter r ~f
+  ;;
+
+  let rec to_pattern t ~f =
+    match t with
+    | Leaf { pattern; a } -> f pattern a
+    | Node { pattern; l; r } ->
+      { pattern with ppat_desc = Ppat_or (to_pattern l ~f, to_pattern r ~f) }
+  ;;
+end
 
 (* Split a [Some _ as x] pattern into two, [Some _] and [_ as x]. The latter could just be
    [x], but we err on the side of caution and replace a [Ppat_alias _] with another
@@ -237,7 +303,7 @@ let split_fake_alias_pattern lhs ((x, _) as alias) aliases =
       let loc =
         { loc_start = merge loc.loc_start hd.loc_start
         ; loc_end = merge loc.loc_end hd.loc_end
-        ; loc_ghost = false (* Needed for unused-var check to work on alias patterns. *)
+        ; loc_ghost = loc.loc_ghost
         }
       in
       if Location.compare loc hd = 0 then acc else loc, hd :: tl)
@@ -272,6 +338,51 @@ let split_fake_alias_pattern lhs ((x, _) as alias) aliases =
         } ))
 ;;
 
+(* Take a pattern like [(Some _ | None) as x] and covert it to [Some _ as x | None as x].
+   This is pretty similar to the above, but subtly different enough for combining them to
+   be more code than it's worth. *)
+let invert_fake_or_pattern_and_aliases pat1 pat2 alias aliases =
+  let relocate_from_inner_to_outer locs loc ~merge ~override_loc_ghost =
+    List.fold locs ~init:(loc, []) ~f:(fun ((hd, tl) as acc) loc ->
+      let loc =
+        { loc_start = merge loc.loc_start hd.loc_start
+        ; loc_end = merge loc.loc_end hd.loc_end
+        ; loc_ghost = Option.value override_loc_ghost ~default:loc.loc_ghost
+        }
+      in
+      if Location.compare loc hd = 0 then acc else loc, hd :: tl)
+  in
+  List.fold (alias :: aliases) ~init:(pat1, pat2) ~f:(fun (pat1, pat2) (x, pat) ->
+    let inner_loc, rev_loc_stack =
+      List.fold pat.ppat_loc_stack ~init:(pat.ppat_loc, []) ~f:(fun (hd, tl) loc ->
+        loc, hd :: tl)
+    in
+    let pat1_loc, pat1_loc_stack =
+      relocate_from_inner_to_outer
+        rev_loc_stack
+        { inner_loc with loc_end = pat1.ppat_loc.loc_end; loc_ghost = true }
+        ~merge:Location.min_pos
+        ~override_loc_ghost:(Some true)
+    in
+    let pat2_loc, pat2_loc_stack =
+      relocate_from_inner_to_outer
+        rev_loc_stack
+        { inner_loc with loc_start = pat2.ppat_loc.loc_start }
+        ~merge:Location.max_pos
+        ~override_loc_ghost:None
+    in
+    ( { ppat_desc = Ppat_alias (pat1, x)
+      ; ppat_loc = pat1_loc
+      ; ppat_loc_stack = pat1_loc_stack
+      ; ppat_attributes = pat.ppat_attributes
+      }
+    , { ppat_desc = Ppat_alias (pat2, x)
+      ; ppat_loc = pat2_loc
+      ; ppat_loc_stack = pat2_loc_stack
+      ; ppat_attributes = pat.ppat_attributes
+      } ))
+;;
+
 (* A "fake" pattern is one which requires a [Foo.t option] expression to be typed
    correctly, effectively only [Ppat_construct _], but we rely on
    [get_pattern_and_bindings] to complain about other unsupported patterns. A "real"
@@ -279,75 +390,100 @@ let split_fake_alias_pattern lhs ((x, _) as alias) aliases =
    must be matched against a [Foo.t option * Foo.Option.t]. Wildcards can be used with
    "any" of the above. We could always generate "both" patterns but it would come at the
    cost of potentially confusing type errors, so we avoid them where possible. *)
-let analyze_fake_pattern pattern =
+let rec analyze_fake_pattern pattern : _ Disjunction_tree.t =
   match pattern.ppat_desc with
-  | Ppat_any -> `Any
-  | Ppat_var _ -> `Real
+  | Ppat_any -> Leaf { pattern; a = `Any }
+  | Ppat_var _ -> Leaf { pattern; a = `Real }
+  | Ppat_or (pat1, pat2) ->
+    Node { pattern; l = analyze_fake_pattern pat1; r = analyze_fake_pattern pat2 }
   | Ppat_alias (pat, x) ->
-    let rec loop pattern alias aliases =
+    let original_alias_pattern = pattern in
+    let rec loop pattern alias aliases : _ Disjunction_tree.t =
       match pattern.ppat_desc with
-      | Ppat_any | Ppat_var _ -> `Real
+      | Ppat_any | Ppat_var _ -> Leaf { pattern = original_alias_pattern; a = `Real }
+      | Ppat_or (pat1, pat2) ->
+        let pat1, pat2 = invert_fake_or_pattern_and_aliases pat1 pat2 alias aliases in
+        Node
+          { pattern = original_alias_pattern
+          ; l = analyze_fake_pattern pat1
+          ; r = analyze_fake_pattern pat2
+          }
       | Ppat_alias (pat, x) -> loop pat (x, pattern) (alias :: aliases)
-      | _ -> `Both (split_fake_alias_pattern pattern alias aliases)
+      | _ ->
+        Leaf
+          { pattern = original_alias_pattern
+          ; a = `Both (split_fake_alias_pattern pattern alias aliases)
+          }
     in
     loop pat (x, pattern) []
-  | _ -> `Fake
+  | _ -> Leaf { pattern; a = `Fake }
 ;;
 
-let make_fake_pattern_compatible expr_kind patt_kind pattern =
-  match expr_kind, patt_kind with
-  | `Fake, `Fake | `Real, `Real | _, `Any -> pattern
-  | `Both, ((`Fake | `Real | `Both _) as kind) ->
-    let wildcard = lazy (ppat_any ~loc:Location.none) in
-    let fake, real =
-      match kind with
-      | `Fake -> pattern, force wildcard
-      | `Real -> force wildcard, pattern
-      | `Both both -> both
-    in
-    ppat_tuple ~loc:{ pattern.ppat_loc with loc_ghost = true } [ fake; real ]
-  | `Any, (`Fake | `Real | `Both _) | `Fake, (`Real | `Both _) | `Real, (`Fake | `Both _)
-    ->
-    Location.raise_errorf
-      ~loc:pattern.ppat_loc
-      "Bug in [%%optional ]: this pattern is incompatible with the corresponding fake \
-       expression"
+let rec analyze_fake_patterns pattern : _ Disjunction_tree.t =
+  match pattern.ppat_desc with
+  | Ppat_or (pat1, pat2) ->
+    Node { pattern; l = analyze_fake_patterns pat1; r = analyze_fake_patterns pat2 }
+  | Ppat_tuple patts ->
+    Leaf { pattern; a = Array.of_list_map ~f:analyze_fake_pattern patts }
+  | _ -> Leaf { pattern; a = [| analyze_fake_pattern pattern |] }
+;;
+
+let make_fake_pattern_compatible expr_kind patt_tree =
+  Disjunction_tree.to_pattern patt_tree ~f:(fun pat patt_kind ->
+    match expr_kind, patt_kind with
+    | `Fake, `Fake | `Real, `Real | _, `Any -> pat
+    | `Both, ((`Fake | `Real | `Both _) as kind) ->
+      let wildcard = lazy (ppat_any ~loc:Location.none) in
+      let fake, real =
+        match kind with
+        | `Fake -> pat, force wildcard
+        | `Real -> force wildcard, pat
+        | `Both both -> both
+      in
+      ppat_tuple ~loc:{ pat.ppat_loc with loc_ghost = true } [ fake; real ]
+    | `Any, (`Fake | `Real | `Both _) | `Fake, (`Real | `Both _) | `Real, (`Fake | `Both _)
+      ->
+      Location.raise_errorf
+        ~loc:pat.ppat_loc
+        "Bug in [%%optional ]: this pattern is incompatible with the corresponding fake \
+         expression")
+;;
+
+let make_fake_patterns_compatible expr_kinds patt_tree =
+  Disjunction_tree.to_pattern patt_tree ~f:(fun pat patt_trees ->
+    match patt_trees with
+    | [| patt_tree |] -> make_fake_pattern_compatible expr_kinds.(0) patt_tree
+    | _ ->
+      let patts =
+        Array.mapi patt_trees ~f:(fun i patt_tree ->
+          make_fake_pattern_compatible expr_kinds.(i) patt_tree)
+        |> Array.to_list
+      in
+      { pat with ppat_desc = Ppat_tuple patts })
 ;;
 
 let translate_fake_match_cases cases ~num_exprs =
-  let patt_kinds =
-    Array.of_list_map cases ~f:(fun { pc_lhs = pat; _ } ->
-      match pat.ppat_desc with
-      | Ppat_tuple patts -> Array.of_list_map ~f:analyze_fake_pattern patts
-      | _ -> [| analyze_fake_pattern pat |])
+  let patt_trees =
+    Array.of_list_map cases ~f:(fun { pc_lhs = pat; _ } -> analyze_fake_patterns pat)
   in
-  let max_num_kinds =
-    Array.fold patt_kinds ~init:num_exprs ~f:(fun num_kinds patt_kinds ->
-      max num_kinds (Array.length patt_kinds))
-  in
-  let expr_kinds = Array.create ~len:max_num_kinds `Any in
+  let max_num_patts = ref num_exprs in
+  Array.iter patt_trees ~f:(fun patt_tree ->
+    Disjunction_tree.iter patt_tree ~f:(fun patt_trees ->
+      Ref.replace max_num_patts (max (Array.length patt_trees))));
+  let expr_kinds = Array.create ~len:!max_num_patts `Any in
   (* We need to ensure the fake expression can generate bindings for all of its
      corresponding patterns. *)
-  Array.iter patt_kinds ~f:(fun patt_kinds ->
-    Array.iteri patt_kinds ~f:(fun e patt_kind ->
-      match expr_kinds.(e), patt_kind with
-      | `Both, _ | `Fake, `Fake | `Real, `Real | _, `Any -> ()
-      | `Any, ((`Fake | `Real) as kind) -> expr_kinds.(e) <- kind
-      | `Fake, `Real | `Real, `Fake | _, `Both _ -> expr_kinds.(e) <- `Both));
+  Array.iter patt_trees ~f:(fun patt_tree ->
+    Disjunction_tree.iter patt_tree ~f:(fun patt_trees ->
+      Array.iteri patt_trees ~f:(fun i patt_tree ->
+        Disjunction_tree.iter patt_tree ~f:(fun patt_kind ->
+          match expr_kinds.(i), patt_kind with
+          | `Both, _ | `Fake, `Fake | `Real, `Real | _, `Any -> ()
+          | `Any, ((`Fake | `Real) as expr_kind) -> expr_kinds.(i) <- expr_kind
+          | `Fake, `Real | `Real, `Fake | _, `Both _ -> expr_kinds.(i) <- `Both))));
   let cases =
-    List.mapi cases ~f:(fun c ({ pc_lhs = pat; _ } as case) ->
-      let patt_kinds = patt_kinds.(c) in
-      let make_fake_pattern_compatible e pat =
-        make_fake_pattern_compatible expr_kinds.(e) patt_kinds.(e) pat
-      in
-      let pat =
-        match pat.ppat_desc with
-        | Ppat_tuple patts ->
-          let patts = List.mapi ~f:make_fake_pattern_compatible patts in
-          { pat with ppat_desc = Ppat_tuple patts }
-        | _ -> make_fake_pattern_compatible 0 pat
-      in
-      { case with pc_lhs = pat })
+    List.mapi cases ~f:(fun c case ->
+      { case with pc_lhs = make_fake_patterns_compatible expr_kinds patt_trees.(c) })
   in
   cases, expr_kinds
 ;;
