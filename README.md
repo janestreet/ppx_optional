@@ -40,6 +40,13 @@ match%optional.Price_float.Option a, b with
 | Some a, Some b -> expression_d
 ```
 
+If any of the expressions to be matched are unboxed, you will need to use
+`%optional_u` instead. This works just as well as `%optional` (and could be used
+everywhere, safely), but gives worse error messages in the case of an incomplete
+pattern match. If you observe other differences between `%optional` and
+`%optional_u` (for example, behavior around merlin queries), please report bugs
+to maintainers.
+
 Usage
 -----
 

@@ -87,24 +87,26 @@ let rec assert_binder pat =
       "sub patterns are restricted to variable names, wildcards and aliases"
 ;;
 
-let disable_all_warnings e =
+let change_warnings warnings_string e =
   let attr =
     let loc = Location.none in
     attribute
       ~loc
       ~name:{ Location.loc; txt = "ocaml.warning" }
-      ~payload:(PStr [ pstr_eval ~loc (estring ~loc "-a") [] ])
+      ~payload:(PStr [ pstr_eval ~loc (estring ~loc warnings_string) [] ])
   in
   { e with pexp_attributes = attr :: e.pexp_attributes }
 ;;
 
+let disable_all_warnings e = change_warnings "-a" e
+let hide_expr e = e |> disable_all_warnings |> Merlin_helpers.hide_expression
+let disable_unused_var_warning e = change_warnings "-unused-var" e
 let varname i = Printf.sprintf "__ppx_optional_e_%i" i
 let evar ~loc i = evar ~loc (varname i)
 let pvar ~loc i = pvar ~loc (varname i)
 
-let get_pattern_and_bindings ~module_ i pattern =
+let get_pattern_and_bindings ~loc ~module_ i pattern =
   let rec loop pat bindings =
-    let loc = pat.ppat_loc in
     let option_binding x =
       value_binding ~loc ~pat:(ppat_var ~loc x) ~expr:(evar ~loc i)
     in
@@ -143,15 +145,18 @@ let get_pattern_and_bindings ~module_ i pattern =
         "only variable names, None, Some, _ and aliases are supported in [%%optional ]"
   in
   let { ppat_desc; _ }, bindings = loop pattern [] in
-  (* by only using the ppat_desc from the pattern we just generated we ensure that the
-     location of the original pattern is kept. *)
-  { pattern with ppat_desc }, bindings
+  { pattern with ppat_desc; ppat_loc = loc }, bindings
+;;
+
+let ignore_pattern binding =
+  { binding with pvb_pat = Merlin_helpers.hide_pattern binding.pvb_pat }
 ;;
 
 let rec rewrite_case
-  ~match_loc
+  ~loc
   ~modules_array
   ~default_module
+  ~unboxed (* true <=> we're in a [%optional_u] *)
   { pc_lhs = pat; pc_rhs = body; pc_guard }
   =
   let get_module i =
@@ -161,14 +166,44 @@ let rec rewrite_case
     if i < Array.length modules_array then modules_array.(i) else default_module
   in
   let single_pattern ~ppat_desc ~bindings =
-    let pc_lhs = { pat with ppat_desc } in
+    (* Merlin_helpers.hide_pattern: this overlaps with the pattern used
+       in the LHS of the bindings, but we don't want an error. Yet we also
+       don't want this to be a ghost location, because if the pattern is
+       ill-typed (e.g. too many patterns), we want the location to point
+       to the pattern. We hide this pattern, not the LHS of let-bindings, so
+       that merlin's go-to-definition works. *)
+    let pc_lhs = Merlin_helpers.hide_pattern { pat with ppat_desc } in
     let pc_rhs, pc_guard =
       match bindings with
       | [] -> body, pc_guard
       | _ :: _ ->
-        ( pexp_let ~loc:match_loc Nonrecursive bindings body
-        , Option.map pc_guard ~f:(fun pc_guard ->
-            pexp_let ~loc:pc_guard.pexp_loc Nonrecursive bindings pc_guard) )
+        (* The bindings need to be in scope both in the guard and in the body. So we must
+           bind the bindings in both. But we must be careful, because a variable might be
+           used only in the guard or in the body, and we don't want spurious unused-var
+           warnings. We thus copy the guard into the body (to create one scope where all the
+           variable are used) and then ignore any unused-var warnings in the guard. *)
+        (match pc_guard with
+         | None -> pexp_let ~loc Nonrecursive bindings body, None
+         | Some guard_exp ->
+           let guard_occ =
+             Merlin_helpers.hide_expression
+               [%expr
+                 ignore ([%e guard_exp] : _);
+                 assert false]
+           in
+           let body_with_guard_occurrences =
+             [%expr if false then [%e guard_occ] else [%e body]]
+           in
+           ( pexp_let ~loc Nonrecursive bindings body_with_guard_occurrences
+           , Some
+               (disable_unused_var_warning
+                  (pexp_let
+                     ~loc
+                     Nonrecursive
+                     (List.map ~f:ignore_pattern bindings)
+                     guard_exp)) ))
+      (* ignore_pattern: we don't want merlin to see both the bindings in the guard and
+           in the case body *)
     in
     [ { pc_lhs; pc_rhs; pc_guard } ]
   in
@@ -193,26 +228,33 @@ let rec rewrite_case
        If there is a [when]-guard, it is possible for it to be evaluated more times than
        it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
        "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
+    if unboxed
+    then
+      Location.raise_errorf
+        ~loc:pat.ppat_loc
+        "or-patterns are not supported with [%%optional_u ].";
     rewrite_case
-      ~match_loc
+      ~loc
       ~modules_array
       ~default_module
+      ~unboxed
       { pc_lhs = pat1; pc_rhs = body; pc_guard }
     @ rewrite_case
-        ~match_loc
+        ~loc
         ~modules_array
         ~default_module
+        ~unboxed
         { pc_lhs = pat2; pc_rhs = body; pc_guard }
   | Ppat_tuple patts ->
     let patts, bindings =
       List.mapi patts ~f:(fun i patt ->
         let module_ = get_module i in
-        get_pattern_and_bindings ~module_ i patt)
+        get_pattern_and_bindings ~loc ~module_ i patt)
       |> List.unzip
     in
     single_pattern ~ppat_desc:(Ppat_tuple patts) ~bindings:(List.concat bindings)
   | _ ->
-    let pat, bindings = get_pattern_and_bindings 0 pat ~module_:modules_array.(0) in
+    let pat, bindings = get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0) in
     single_pattern ~ppat_desc:pat.ppat_desc ~bindings
 ;;
 
@@ -233,10 +275,10 @@ let rewrite_matched_expr t ~wrapper =
   { t.original_matched_expr with pexp_desc; pexp_loc }
 ;;
 
-let real_match t =
+(* unboxed: true <=> we're in an [optional_u] *)
+let real_match ~loc ~unboxed t =
   let new_matched_expr =
     rewrite_matched_expr t ~wrapper:(fun ~module_ (_ : int) expr ->
-      let loc = expr.pexp_loc in
       eapply ~loc (eis_none ~loc ~module_) [ expr ])
   in
   let modules = List.map t.elements ~f:(fun { module_; _ } -> module_) in
@@ -245,13 +287,12 @@ let real_match t =
       t.cases
       ~f:
         (rewrite_case
-           ~match_loc:t.match_loc
+           ~loc
            ~modules_array:(Array.of_list modules)
-           ~default_module:t.default_module)
+           ~default_module:t.default_module
+           ~unboxed)
   in
-  (* we can disable the warning here as we rely on the other match we generate for
-     error messages. *)
-  disable_all_warnings (pexp_match ~loc:t.match_loc new_matched_expr cases)
+  pexp_match ~loc new_matched_expr cases
 ;;
 
 (* Represents the structure of or-patterns. *)
@@ -522,7 +563,7 @@ let bindings_for_matched_expr matched_expr =
   List.mapi matched_expr ~f:(fun i { Matched_expression_element.exp; _ } -> bind i exp)
 ;;
 
-let expand_match ~match_loc ~(module_ : longident loc option) matched_expr cases =
+let expand_match ~unboxed ~match_loc ~(module_ : longident loc option) matched_expr cases =
   let t =
     { default_module = module_scope_of_option module_
     ; original_matched_expr = matched_expr
@@ -531,36 +572,39 @@ let expand_match ~match_loc ~(module_ : longident loc option) matched_expr cases
     ; cases
     }
   in
-  let fake_match =
-    (* The types in this branch actually match what the user would expect given the source
-       code, so we tell merlin to do all its work in here. *)
-    Merlin_helpers.focus_expression (fake_match t)
-  in
-  let real_match =
-    (* The types here actually have nothing to do with what's in the source ([bool]
-       appears for example), so we tell merlin to avoid that branch. *)
-    Merlin_helpers.hide_expression (real_match t)
-  in
   let bindings = bindings_for_matched_expr t.elements in
   let loc = { match_loc with loc_ghost = true } in
-  pexp_let
-    ~loc
-    Nonrecursive
-    bindings
-    (pexp_ifthenelse ~loc (ebool ~loc false) fake_match (Some real_match))
+  let body =
+    if unboxed
+    then real_match ~loc ~unboxed t
+    else (
+      let fake_match =
+        (* The types in this branch actually match what the user would expect given the source
+           code, so we tell merlin to do all its work in here. *)
+        Merlin_helpers.focus_expression (fake_match t)
+      in
+      let real_match =
+        (* The types here actually have nothing to do with what's in the source ([bool]
+           appears for example), so we hide this branch. This also disables warnings, but
+           that's OK because we rely on the other match we generate for error messages. *)
+        real_match ~loc ~unboxed t |> hide_expr
+      in
+      [%expr if false then [%e fake_match] else [%e real_match]])
+  in
+  pexp_let ~loc Nonrecursive bindings body
 ;;
 
 (* We add the indirection instead of directly matching on [pexp_match] when declaring the
    extension because we want more informative error messages than "Extension was not
    translated". *)
-let expand_match ~loc ~path:_ ~arg:(module_ : longident loc option) e =
+let expand_match ~unboxed ~loc ~path:_ ~arg:(module_ : longident loc option) e =
   Ast_pattern.parse
     Ast_pattern.(pexp_match __ __)
     loc
     e
     ~on_error:(fun () ->
       Location.raise_errorf ~loc "[%%optional ] must apply to a match statement")
-    (expand_match ~match_loc:e.pexp_loc ~module_)
+    (expand_match ~unboxed ~match_loc:e.pexp_loc ~module_)
 ;;
 
 let optional =
@@ -568,7 +612,18 @@ let optional =
     "optional"
     Extension.Context.expression
     Ast_pattern.(single_expr_payload __)
-    expand_match
+    (expand_match ~unboxed:false)
+;;
+
+let optional_u =
+  Extension.declare_with_path_arg
+    "optional_u"
+    Extension.Context.expression
+    Ast_pattern.(single_expr_payload __)
+    (expand_match ~unboxed:true)
 ;;
 
 let () = Driver.register_transformation "optional" ~extensions:[ optional ]
+let () = Driver.register_transformation "optional_u" ~extensions:[ optional_u ]
+(* The fake match built above doesn't work for unboxed types. So [optional_u] doesn't
+   generate it. *)
