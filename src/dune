@@ -2,6 +2,6 @@
  (name ppx_optional)
  (public_name ppx_optional)
  (kind ppx_rewriter)
- (libraries base ppxlib)
+ (libraries base ppxlib ppxlib_jane)
  (preprocess
   (pps ppxlib.metaquot)))

@@ -43,9 +43,15 @@ let infer_module_from_core_type ~module_ (core_type : core_type) =
 
 let expand_matched_expr ~(module_ : longident loc option) matched_expr =
   let individual_exprs =
-    match matched_expr.pexp_desc with
-    | Pexp_tuple exprs -> exprs
-    | _ -> [ matched_expr ]
+    match Ppxlib_jane.Jane_syntax.Expression.of_ast matched_expr with
+    | Some (Jexp_tuple _fields, _attrs) ->
+      Location.raise_errorf
+        ~loc:matched_expr.pexp_loc
+        "labeled tuples are unsupported in [%%optional ]"
+    | None | Some _ ->
+      (match matched_expr.pexp_desc with
+       | Pexp_tuple exprs -> exprs
+       | _ -> [ matched_expr ])
   in
   List.map individual_exprs ~f:(fun exp ->
     match exp.pexp_desc with
@@ -207,55 +213,63 @@ let rec rewrite_case
     in
     [ { pc_lhs; pc_rhs; pc_guard } ]
   in
-  match pat.ppat_desc with
-  | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
+  match Ppxlib_jane.Jane_syntax.Pattern.of_ast pat with
+  | Some (Jpat_tuple _fields, _attrs) ->
     Location.raise_errorf
       ~loc:pat.ppat_loc
-      "this pattern would bind a tuple to the variable %s, which is unsupported in \
-       [%%optional ]"
-      x.txt
-  | Ppat_or (pat1, pat2) ->
-    (* Just turn disjunctions into a list of individual cases with identical rhs
-       expressions and guards. The OCaml manual explicitly says they are evaluated and
-       bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
+      "labeled tuples are unsupported in [%%optional ]"
+  | None | Some _ ->
+    (match pat.ppat_desc with
+     | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
+       Location.raise_errorf
+         ~loc:pat.ppat_loc
+         "this pattern would bind a tuple to the variable %s, which is unsupported in \
+          [%%optional ]"
+         x.txt
+     | Ppat_or (pat1, pat2) ->
+       (* Just turn disjunctions into a list of individual cases with identical rhs
+          expressions and guards. The OCaml manual explicitly says they are evaluated and
+          bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
 
-       If the rhs expression is a lot of code, this could potentially blow up binary size,
-       slow down compilation, and/or hurt performance due to cache locality. But we didn't
-       support or-patterns for a long time, so most code already just duplicates the rhs,
-       and this is much easier than generating an actual or-pattern with correct bindings.
-       We can implement that instead if the need arises in the future.
+          If the rhs expression is a lot of code, this could potentially blow up binary size,
+          slow down compilation, and/or hurt performance due to cache locality. But we didn't
+          support or-patterns for a long time, so most code already just duplicates the rhs,
+          and this is much easier than generating an actual or-pattern with correct bindings.
+          We can implement that instead if the need arises in the future.
 
-       If there is a [when]-guard, it is possible for it to be evaluated more times than
-       it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
-       "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
-    if unboxed
-    then
-      Location.raise_errorf
-        ~loc:pat.ppat_loc
-        "or-patterns are not supported with [%%optional_u ].";
-    rewrite_case
-      ~loc
-      ~modules_array
-      ~default_module
-      ~unboxed
-      { pc_lhs = pat1; pc_rhs = body; pc_guard }
-    @ rewrite_case
-        ~loc
-        ~modules_array
-        ~default_module
-        ~unboxed
-        { pc_lhs = pat2; pc_rhs = body; pc_guard }
-  | Ppat_tuple patts ->
-    let patts, bindings =
-      List.mapi patts ~f:(fun i patt ->
-        let module_ = get_module i in
-        get_pattern_and_bindings ~loc ~module_ i patt)
-      |> List.unzip
-    in
-    single_pattern ~ppat_desc:(Ppat_tuple patts) ~bindings:(List.concat bindings)
-  | _ ->
-    let pat, bindings = get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0) in
-    single_pattern ~ppat_desc:pat.ppat_desc ~bindings
+          If there is a [when]-guard, it is possible for it to be evaluated more times than
+          it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
+          "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
+       if unboxed
+       then
+         Location.raise_errorf
+           ~loc:pat.ppat_loc
+           "or-patterns are not supported with [%%optional_u ].";
+       rewrite_case
+         ~loc
+         ~modules_array
+         ~default_module
+         ~unboxed
+         { pc_lhs = pat1; pc_rhs = body; pc_guard }
+       @ rewrite_case
+           ~loc
+           ~modules_array
+           ~default_module
+           ~unboxed
+           { pc_lhs = pat2; pc_rhs = body; pc_guard }
+     | Ppat_tuple patts ->
+       let patts, bindings =
+         List.mapi patts ~f:(fun i patt ->
+           let module_ = get_module i in
+           get_pattern_and_bindings ~loc ~module_ i patt)
+         |> List.unzip
+       in
+       single_pattern ~ppat_desc:(Ppat_tuple patts) ~bindings:(List.concat bindings)
+     | _ ->
+       let pat, bindings =
+         get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0)
+       in
+       single_pattern ~ppat_desc:pat.ppat_desc ~bindings)
 ;;
 
 (** Take the matched expression and replace all its components by a variable, which will
