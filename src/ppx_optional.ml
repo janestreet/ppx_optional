@@ -286,7 +286,7 @@ let rewrite_matched_expr t ~wrapper =
     | list -> Pexp_tuple (List.mapi list ~f:subst_and_wrap)
   in
   let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
-  { t.original_matched_expr with pexp_desc; pexp_loc }
+  { pexp_desc; pexp_loc; pexp_loc_stack = []; pexp_attributes = [] }
 ;;
 
 (* unboxed: true <=> we're in an [optional_u] *)
