@@ -54,8 +54,10 @@ let expand_matched_expr ~(module_ : longident loc option) matched_expr =
        | _ -> [ matched_expr ])
   in
   List.map individual_exprs ~f:(fun exp ->
-    match exp.pexp_desc with
-    | Pexp_constraint (_exp, core_type) ->
+    match
+      Ppxlib_jane.Shim.Expression_desc.of_parsetree ~loc:exp.pexp_loc exp.pexp_desc
+    with
+    | Pexp_constraint (_exp, Some core_type, _) ->
       { Matched_expression_element.module_ =
           infer_module_from_core_type ~module_ core_type
       ; exp
@@ -82,8 +84,8 @@ let eunsafe_value = eoperator "unsafe_value"
 let eis_none = eoperator "is_none"
 
 let rec assert_binder pat =
-  match pat.ppat_desc with
-  | Ppat_alias (pat, _) | Ppat_constraint (pat, _) ->
+  match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pat.ppat_desc with
+  | Ppat_alias (pat, _) | Ppat_constraint (pat, _, _) ->
     (* Allow "Some (_ as x)" and "Some (_ : typ)" *)
     assert_binder pat
   | Ppat_var _ | Ppat_any -> ()
