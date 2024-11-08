@@ -43,19 +43,25 @@ let infer_module_from_core_type ~module_ (core_type : core_type) =
 
 let expand_matched_expr ~(module_ : longident loc option) matched_expr =
   let individual_exprs =
-    match Ppxlib_jane.Jane_syntax.Expression.of_ast matched_expr with
-    | Some (Jexp_tuple _fields, _attrs) ->
-      Location.raise_errorf
+    match
+      Ppxlib_jane.Shim.Expression_desc.of_parsetree
+        matched_expr.pexp_desc
         ~loc:matched_expr.pexp_loc
-        "labeled tuples are unsupported in [%%optional ]"
-    | None | Some _ ->
-      (match matched_expr.pexp_desc with
-       | Pexp_tuple exprs -> exprs
-       | _ -> [ matched_expr ])
+    with
+    | Pexp_tuple labeled_exprs ->
+      (match Ppxlib_jane.as_unlabeled_tuple labeled_exprs with
+       | Some exprs -> exprs
+       | None ->
+         Location.raise_errorf
+           ~loc:matched_expr.pexp_loc
+           "labeled tuples are unsupported in [%%optional ]")
+    | _ -> [ matched_expr ]
   in
   List.map individual_exprs ~f:(fun exp ->
-    match exp.pexp_desc with
-    | Pexp_constraint (_exp, core_type) ->
+    match
+      Ppxlib_jane.Shim.Expression_desc.of_parsetree ~loc:exp.pexp_loc exp.pexp_desc
+    with
+    | Pexp_constraint (_exp, Some core_type, _) ->
       { Matched_expression_element.module_ =
           infer_module_from_core_type ~module_ core_type
       ; exp
@@ -82,8 +88,8 @@ let eunsafe_value = eoperator "unsafe_value"
 let eis_none = eoperator "is_none"
 
 let rec assert_binder pat =
-  match pat.ppat_desc with
-  | Ppat_alias (pat, _) | Ppat_constraint (pat, _) ->
+  match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pat.ppat_desc with
+  | Ppat_alias (pat, _) | Ppat_constraint (pat, _, _) ->
     (* Allow "Some (_ as x)" and "Some (_ : typ)" *)
     assert_binder pat
   | Ppat_var _ | Ppat_any -> ()
@@ -213,21 +219,15 @@ let rec rewrite_case
     in
     [ { pc_lhs; pc_rhs; pc_guard } ]
   in
-  match Ppxlib_jane.Jane_syntax.Pattern.of_ast pat with
-  | Some (Jpat_tuple _fields, _attrs) ->
+  match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pat.ppat_desc with
+  | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
     Location.raise_errorf
       ~loc:pat.ppat_loc
-      "labeled tuples are unsupported in [%%optional ]"
-  | None | Some _ ->
-    (match pat.ppat_desc with
-     | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
-       Location.raise_errorf
-         ~loc:pat.ppat_loc
-         "this pattern would bind a tuple to the variable %s, which is unsupported in \
-          [%%optional ]"
-         x.txt
-     | Ppat_or (pat1, pat2) ->
-       (* Just turn disjunctions into a list of individual cases with identical rhs
+      "this pattern would bind a tuple to the variable %s, which is unsupported in \
+       [%%optional ]"
+      x.txt
+  | Ppat_or (pat1, pat2) ->
+    (* Just turn disjunctions into a list of individual cases with identical rhs
           expressions and guards. The OCaml manual explicitly says they are evaluated and
           bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
 
@@ -240,36 +240,48 @@ let rec rewrite_case
           If there is a [when]-guard, it is possible for it to be evaluated more times than
           it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
           "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
-       if unboxed
-       then
-         Location.raise_errorf
-           ~loc:pat.ppat_loc
-           "or-patterns are not supported with [%%optional_u ].";
-       rewrite_case
-         ~loc
-         ~modules_array
-         ~default_module
-         ~unboxed
-         { pc_lhs = pat1; pc_rhs = body; pc_guard }
-       @ rewrite_case
-           ~loc
-           ~modules_array
-           ~default_module
-           ~unboxed
-           { pc_lhs = pat2; pc_rhs = body; pc_guard }
-     | Ppat_tuple patts ->
+    if unboxed
+    then
+      Location.raise_errorf
+        ~loc:pat.ppat_loc
+        "or-patterns are not supported with [%%optional_u ].";
+    rewrite_case
+      ~loc
+      ~modules_array
+      ~default_module
+      ~unboxed
+      { pc_lhs = pat1; pc_rhs = body; pc_guard }
+    @ rewrite_case
+        ~loc
+        ~modules_array
+        ~default_module
+        ~unboxed
+        { pc_lhs = pat2; pc_rhs = body; pc_guard }
+  | Ppat_tuple (_, Open) ->
+    Location.raise_errorf
+      ~loc:pat.ppat_loc
+      "open tuple patterns are unsupported in [%%optional ]"
+  | Ppat_tuple (labeled_patts, Closed) ->
+    (match Ppxlib_jane.as_unlabeled_tuple labeled_patts with
+     | Some patts ->
        let patts, bindings =
          List.mapi patts ~f:(fun i patt ->
            let module_ = get_module i in
            get_pattern_and_bindings ~loc ~module_ i patt)
          |> List.unzip
        in
-       single_pattern ~ppat_desc:(Ppat_tuple patts) ~bindings:(List.concat bindings)
-     | _ ->
-       let pat, bindings =
-         get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0)
-       in
-       single_pattern ~ppat_desc:pat.ppat_desc ~bindings)
+       single_pattern
+         ~ppat_desc:
+           (Ppxlib_jane.Shim.Pattern_desc.to_parsetree
+              (Ppat_tuple (List.map ~f:(fun p -> None, p) patts, Closed)))
+         ~bindings:(List.concat bindings)
+     | None ->
+       Location.raise_errorf
+         ~loc:pat.ppat_loc
+         "labeled tuples are unsupported in [%%optional ]")
+  | _ ->
+    let pat, bindings = get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0) in
+    single_pattern ~ppat_desc:pat.ppat_desc ~bindings
 ;;
 
 (** Take the matched expression and replace all its components by a variable, which will
@@ -283,7 +295,9 @@ let rewrite_matched_expr t ~wrapper =
   let pexp_desc =
     match t.elements with
     | [ singleton ] -> (subst_and_wrap 0 singleton).pexp_desc
-    | list -> Pexp_tuple (List.mapi list ~f:subst_and_wrap)
+    | list ->
+      Ppxlib_jane.Shim.Expression_desc.to_parsetree
+        (Pexp_tuple (List.mapi list ~f:(fun i e -> None, subst_and_wrap i e)))
   in
   let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
   { pexp_desc; pexp_loc; pexp_loc_stack = []; pexp_attributes = [] }
@@ -475,11 +489,13 @@ let rec analyze_fake_pattern pattern : _ Disjunction_tree.t =
 ;;
 
 let rec analyze_fake_patterns pattern : _ Disjunction_tree.t =
-  match pattern.ppat_desc with
+  match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pattern.ppat_desc with
   | Ppat_or (pat1, pat2) ->
     Node { pattern; l = analyze_fake_patterns pat1; r = analyze_fake_patterns pat2 }
-  | Ppat_tuple patts ->
-    Leaf { pattern; a = Array.of_list_map ~f:analyze_fake_pattern patts }
+  | Ppat_tuple (labeled_patts, Closed) ->
+    (match Ppxlib_jane.as_unlabeled_tuple labeled_patts with
+     | Some patts -> Leaf { pattern; a = Array.of_list_map ~f:analyze_fake_pattern patts }
+     | None -> Leaf { pattern; a = [| analyze_fake_pattern pattern |] })
   | _ -> Leaf { pattern; a = [| analyze_fake_pattern pattern |] }
 ;;
 
@@ -511,10 +527,13 @@ let make_fake_patterns_compatible expr_kinds patt_tree =
     | _ ->
       let patts =
         Array.mapi patt_trees ~f:(fun i patt_tree ->
-          make_fake_pattern_compatible expr_kinds.(i) patt_tree)
+          None, make_fake_pattern_compatible expr_kinds.(i) patt_tree)
         |> Array.to_list
       in
-      { pat with ppat_desc = Ppat_tuple patts })
+      { pat with
+        ppat_desc =
+          Ppxlib_jane.Shim.Pattern_desc.to_parsetree (Ppat_tuple (patts, Closed))
+      })
 ;;
 
 let translate_fake_match_cases cases ~num_exprs =
