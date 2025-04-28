@@ -273,6 +273,7 @@ let rec rewrite_case
        single_pattern
          ~ppat_desc:
            (Ppxlib_jane.Shim.Pattern_desc.to_parsetree
+              ~loc
               (Ppat_tuple (List.map ~f:(fun p -> None, p) patts, Closed)))
          ~bindings:(List.concat bindings)
      | None ->
@@ -285,21 +286,22 @@ let rec rewrite_case
 ;;
 
 (** Take the matched expression and replace all its components by a variable, which will
-    have been bound previously, wrapped by [wrapper].
-    We do keep the location of the initial component for the new one. *)
+    have been bound previously, wrapped by [wrapper]. We do keep the location of the
+    initial component for the new one. *)
 let rewrite_matched_expr t ~wrapper =
   let subst_and_wrap i { Matched_expression_element.module_; exp } =
     let loc = { exp.pexp_loc with loc_ghost = true } in
     wrapper ~module_ i (evar ~loc i)
   in
+  let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
   let pexp_desc =
     match t.elements with
     | [ singleton ] -> (subst_and_wrap 0 singleton).pexp_desc
     | list ->
       Ppxlib_jane.Shim.Expression_desc.to_parsetree
+        ~loc:pexp_loc
         (Pexp_tuple (List.mapi list ~f:(fun i e -> None, subst_and_wrap i e)))
   in
-  let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
   { pexp_desc; pexp_loc; pexp_loc_stack = []; pexp_attributes = [] }
 ;;
 
@@ -532,7 +534,9 @@ let make_fake_patterns_compatible expr_kinds patt_tree =
       in
       { pat with
         ppat_desc =
-          Ppxlib_jane.Shim.Pattern_desc.to_parsetree (Ppat_tuple (patts, Closed))
+          Ppxlib_jane.Shim.Pattern_desc.to_parsetree
+            ~loc:pat.ppat_loc
+            (Ppat_tuple (patts, Closed))
       })
 ;;
 
@@ -577,8 +581,8 @@ let fake_match t =
           (* This code will never be executed, it is just here so the type checker
               generates nice error messages. *)
           if [%e eis_none ~loc ~module_] [%e expr]
-          then None
-          else Some ([%e eunsafe_value ~loc ~module_] [%e expr])]
+          then Stdlib.Option.None
+          else Stdlib.Option.Some ([%e eunsafe_value ~loc ~module_] [%e expr])]
       in
       match kinds.(i) with
       | `Fake -> fake_option
