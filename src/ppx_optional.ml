@@ -9,9 +9,14 @@ type module_scope =
   | Use_optional_syntax_optional_syntax
   | From_module of longident loc
 
+type scope_and_locality =
+  { module_ : module_scope
+  ; local : bool
+  }
+
 module Matched_expression_element = struct
   type t =
-    { module_ : module_scope
+    { scope_and_locality : scope_and_locality
     ; exp : expression
     }
 end
@@ -61,12 +66,21 @@ let expand_matched_expr ~(module_ : longident loc option) matched_expr =
     match
       Ppxlib_jane.Shim.Expression_desc.of_parsetree ~loc:exp.pexp_loc exp.pexp_desc
     with
-    | Pexp_constraint (_exp, Some core_type, _) ->
-      { Matched_expression_element.module_ =
-          infer_module_from_core_type ~module_ core_type
+    | Pexp_constraint (_exp, Some core_type, modes) ->
+      ({ scope_and_locality =
+           { module_ = infer_module_from_core_type ~module_ core_type
+           ; local =
+               List.exists modes ~f:(function
+                 | { txt = Mode "local"; _ } -> true
+                 | { txt = Mode _; _ } -> false)
+           }
+       ; exp
+       }
+       : Matched_expression_element.t)
+    | _ ->
+      { scope_and_locality = { module_ = module_scope_of_option module_; local = false }
       ; exp
-      }
-    | _ -> { module_ = module_scope_of_option module_; exp })
+      })
 ;;
 
 let optional_syntax_str = "Optional_syntax"
@@ -79,13 +93,15 @@ let optional_syntax ~module_ : Longident.t =
   | From_module id -> Ldot (Ldot (id.txt, optional_syntax_str), optional_syntax_str)
 ;;
 
-let eoperator ~loc ~module_ func =
+let eoperator ~loc ~(scope_and_locality : scope_and_locality) ~mangle_local func =
+  let { module_; local } = scope_and_locality in
+  let func = if local && mangle_local then func ^ "__local" else func in
   let lid : Longident.t = Ldot (optional_syntax ~module_, func) in
   pexp_ident ~loc (Located.mk ~loc lid)
 ;;
 
-let eunsafe_value = eoperator "unsafe_value"
-let eis_none = eoperator "is_none"
+let eunsafe_value = eoperator ~mangle_local:true "unsafe_value"
+let eis_none = eoperator ~mangle_local:false "is_none"
 
 let rec assert_binder pat =
   match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pat.ppat_desc with
@@ -117,7 +133,7 @@ let varname i = Printf.sprintf "__ppx_optional_e_%i" i
 let evar ~loc i = evar ~loc (varname i)
 let pvar ~loc i = pvar ~loc (varname i)
 
-let get_pattern_and_bindings ~loc ~module_ i pattern =
+let get_pattern_and_bindings ~loc ~scope_and_locality i pattern =
   let rec loop pat bindings =
     let option_binding x =
       value_binding ~loc ~pat:(ppat_var ~loc x) ~expr:(evar ~loc i)
@@ -126,7 +142,7 @@ let get_pattern_and_bindings ~loc ~module_ i pattern =
       value_binding
         ~loc
         ~pat:[%pat? ([%p x] : _)]
-        ~expr:(eapply ~loc (eunsafe_value ~loc ~module_) [ evar ~loc i ])
+        ~expr:(eapply ~loc (eunsafe_value ~loc ~scope_and_locality) [ evar ~loc i ])
     in
     match pat with
     | { ppat_desc = Ppat_alias (pat, x); _ } ->
@@ -166,16 +182,16 @@ let ignore_pattern binding =
 
 let rec rewrite_case
   ~loc
-  ~modules_array
-  ~default_module
+  ~scope_array
+  ~default_scope
   ~unboxed (* true <=> we're in a [%optional_u] *)
   { pc_lhs = pat; pc_rhs = body; pc_guard }
   =
-  let get_module i =
+  let get_scope i =
     (* Sadly, we need to be able to handle the case when the length of the matched
        expression doesn't equal the length of the case, in order to produce useful
        error messages (with the proper types). *)
-    if i < Array.length modules_array then modules_array.(i) else default_module
+    if i < Array.length scope_array then scope_array.(i) else default_scope
   in
   let single_pattern ~ppat_desc ~bindings =
     (* Merlin_helpers.hide_pattern: this overlaps with the pattern used
@@ -220,7 +236,7 @@ let rec rewrite_case
     [ { pc_lhs; pc_rhs; pc_guard } ]
   in
   match Ppxlib_jane.Shim.Pattern_desc.of_parsetree pat.ppat_desc with
-  | (Ppat_alias (_, x) | Ppat_var x) when Array.length modules_array > 1 ->
+  | (Ppat_alias (_, x) | Ppat_var x) when Array.length scope_array > 1 ->
     Location.raise_errorf
       ~loc:pat.ppat_loc
       "this pattern would bind a tuple to the variable %s, which is unsupported in \
@@ -247,14 +263,14 @@ let rec rewrite_case
         "or-patterns are not supported with [%%optional_u ].";
     rewrite_case
       ~loc
-      ~modules_array
-      ~default_module
+      ~scope_array
+      ~default_scope
       ~unboxed
       { pc_lhs = pat1; pc_rhs = body; pc_guard }
     @ rewrite_case
         ~loc
-        ~modules_array
-        ~default_module
+        ~scope_array
+        ~default_scope
         ~unboxed
         { pc_lhs = pat2; pc_rhs = body; pc_guard }
   | Ppat_tuple (_, Open) ->
@@ -266,8 +282,8 @@ let rec rewrite_case
      | Some patts ->
        let patts, bindings =
          List.mapi patts ~f:(fun i patt ->
-           let module_ = get_module i in
-           get_pattern_and_bindings ~loc ~module_ i patt)
+           let scope_and_locality = get_scope i in
+           get_pattern_and_bindings ~loc ~scope_and_locality i patt)
          |> List.unzip
        in
        single_pattern
@@ -281,7 +297,9 @@ let rec rewrite_case
          ~loc:pat.ppat_loc
          "labeled tuples are unsupported in [%%optional ]")
   | _ ->
-    let pat, bindings = get_pattern_and_bindings ~loc 0 pat ~module_:modules_array.(0) in
+    let pat, bindings =
+      get_pattern_and_bindings ~loc 0 pat ~scope_and_locality:scope_array.(0)
+    in
     single_pattern ~ppat_desc:pat.ppat_desc ~bindings
 ;;
 
@@ -289,9 +307,9 @@ let rec rewrite_case
     have been bound previously, wrapped by [wrapper]. We do keep the location of the
     initial component for the new one. *)
 let rewrite_matched_expr t ~wrapper =
-  let subst_and_wrap i { Matched_expression_element.module_; exp } =
+  let subst_and_wrap i { Matched_expression_element.scope_and_locality; exp } =
     let loc = { exp.pexp_loc with loc_ghost = true } in
-    wrapper ~module_ i (evar ~loc i)
+    wrapper ~scope_and_locality i (evar ~loc i)
   in
   let pexp_loc = { t.original_matched_expr.pexp_loc with loc_ghost = true } in
   let pexp_desc =
@@ -308,18 +326,20 @@ let rewrite_matched_expr t ~wrapper =
 (* unboxed: true <=> we're in an [optional_u] *)
 let real_match ~loc ~unboxed t =
   let new_matched_expr =
-    rewrite_matched_expr t ~wrapper:(fun ~module_ (_ : int) expr ->
-      eapply ~loc (eis_none ~loc ~module_) [ expr ])
+    rewrite_matched_expr t ~wrapper:(fun ~scope_and_locality (_ : int) expr ->
+      eapply ~loc (eis_none ~loc ~scope_and_locality) [ expr ])
   in
-  let modules = List.map t.elements ~f:(fun { module_; _ } -> module_) in
+  let scopes =
+    List.map t.elements ~f:(fun { scope_and_locality; _ } -> scope_and_locality)
+  in
   let cases =
     List.concat_map
       t.cases
       ~f:
         (rewrite_case
            ~loc
-           ~modules_array:(Array.of_list modules)
-           ~default_module:t.default_module
+           ~scope_array:(Array.of_list scopes)
+           ~default_scope:{ module_ = t.default_module; local = false }
            ~unboxed)
   in
   pexp_match ~loc new_matched_expr cases
@@ -574,15 +594,15 @@ let fake_match t =
     translate_fake_match_cases t.cases ~num_exprs:(List.length t.elements)
   in
   let new_matched_expr =
-    rewrite_matched_expr t ~wrapper:(fun ~module_ i expr ->
+    rewrite_matched_expr t ~wrapper:(fun ~scope_and_locality i expr ->
       let loc = expr.pexp_loc in
       let fake_option =
         [%expr
           (* This code will never be executed, it is just here so the type checker
               generates nice error messages. *)
-          if [%e eis_none ~loc ~module_] [%e expr]
+          if [%e eis_none ~loc ~scope_and_locality] [%e expr]
           then Stdlib.Option.None
-          else Stdlib.Option.Some ([%e eunsafe_value ~loc ~module_] [%e expr])]
+          else Stdlib.Option.Some ([%e eunsafe_value ~loc ~scope_and_locality] [%e expr])]
       in
       match kinds.(i) with
       | `Fake -> fake_option

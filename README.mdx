@@ -1,0 +1,123 @@
+ppx_optional - match statements for zero-alloc options
+======================================================
+
+<!--
+```ocaml
+open Core
+```
+-->
+
+A ppx rewriter that rewrites simple match statements with an if then
+else expression.
+
+Purpose
+-------
+
+This is normally used to safely access an optional value while
+avoiding allocation for immediate values
+(e.g. `Immediate.{Char,Bool,Int}.Option`, `Fixed.Option`,
+`Price.Fixed.Option`, etc...).
+
+Syntax
+------
+
+`ppx_optional` rewrites the extension `match%optional` in expressions.
+It requires that a module `Optional_syntax` is in scope, and that it
+has `is_none` and `unsafe_value` values.
+
+For instance:
+
+```ocaml skip
+match%optional e with
+| None -> none_expression
+| Some x -> some_expression
+```
+
+becomes:
+
+```ocaml skip
+if Optional_syntax.is_none e then begin
+   none_expression
+end else begin
+   let x = Optional_syntax.unsafe_value e in
+   some_expression
+end
+```
+
+Another example with multiple values and inline getting `Optional_syntax` in scope:
+
+```ocaml
+# let f a b =
+    match%optional.Packed_float_option a, b with
+    | None, None -> print_s [%message "none"]
+    | Some a, None -> print_s [%message "left" ~_:(a : float)]
+    | None, Some b -> print_s [%message "right" ~_:(b : float)]
+    | Some a, Some b -> print_s [%message "both" ~_:(a : float) ~_:(b : float)]
+  in
+  f (Packed_float_option.some 7.) (Packed_float_option.none);
+  f (Packed_float_option.some 7.) (Packed_float_option.some 8.)
+(left 7)
+(both 7 8)
+- : unit = ()
+```
+
+`ppx_optional` can also find `Optional_syntax` based on the type annotation of
+the matched expression, which can be used to match on several values of
+different optional types with one `match%optional` expression. If any of the
+expressions to be matched are unboxed, you will need to use `%optional_u`
+instead. This works just as well as `%optional` (and could be used everywhere,
+safely), but gives worse error messages in the case of an incomplete pattern
+match. If you observe other differences between `%optional` and `%optional_u`
+(for example, behavior around merlin queries), please report bugs to
+maintainers.
+
+```ocaml
+# let f a b =
+    match%optional_u.Float_u.Option a, (b : Packed_float_option.t) with
+    | None, None -> print_s [%message "none"]
+    | Some a, None -> print_s [%message "left" ~_:(a : Float_u.t)]
+    | None, Some b -> print_s [%message "right" ~_:(b : float)]
+    | Some a, Some b -> print_s [%message "both" ~_:(a : Float_u.t) ~_:(b : float)]
+  in
+  f (Float_u.Option.some #7.) (Packed_float_option.none);
+  f (Float_u.Option.some #7.) (Packed_float_option.some 8.)
+(left 7)
+(both 7 8)
+- : unit = ()
+```
+
+Local allocation and [`ppx_template`](%{root}/ppx/ppx_template/doc/README.mdx)
+------------------------------------------------------------------------------
+
+`ppx_optional` can also be used to inspect `local` optional values for types
+that have a corresponding `Optional_syntax` module that implements
+`Optional_syntax.S [@mode local]`. If the type annotation on a matched value
+includes an annotation `@@ local`, then the ppx calls into
+`Optional_syntax.unsafe_value [@mode local]` instead of
+`Optional_syntax.unsafe_value`.
+
+```ocaml
+# let local_ f = Packed_float_option.some 7. in
+  match%optional (f : Packed_float_option.t @@ local) with
+  | None -> Sexp.List []
+  | Some f -> f |> [%sexp_of_local: float] |> Sexp.globalize
+- : Sexp.t = 7
+```
+
+These annotations can be used to template functions that use optional syntax
+over the mode of the arguments:
+
+```ocaml
+# let%template maybe_add (a @ m) (b @ m) =
+    (match%optional.Packed_float_option (a : _ @@ m), (b : _ @@ m) with
+     | Some a, Some b -> (Packed_float_option.some [@mode m]) (a +. b) [@nontail]
+     | None, _ | _, None -> Packed_float_option.none)
+    [@exclave_if_stack a]
+  [@@alloc a @ m = (heap_global, stack_local)]
+val maybe_add :
+  Packed_float_option.t -> Packed_float_option.t -> Packed_float_option.t =
+  <fun>
+val maybe_add__stack :
+  local_ Packed_float_option.t ->
+  local_ Packed_float_option.t -> local_ Packed_float_option.t = <fun>
+```
