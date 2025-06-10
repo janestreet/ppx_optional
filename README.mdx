@@ -98,7 +98,7 @@ includes an annotation `@@ local`, then the ppx calls into
 
 ```ocaml
 # let local_ f = Packed_float_option.some 7. in
-  match%optional (f : Packed_float_option.t @@ local) with
+  match%optional (f : Packed_float_option.t @ local) with
   | None -> Sexp.List []
   | Some f -> f |> [%sexp_of_local: float] |> Sexp.globalize
 - : Sexp.t = 7
@@ -109,7 +109,7 @@ over the mode of the arguments:
 
 ```ocaml
 # let%template maybe_add (a @ m) (b @ m) =
-    (match%optional.Packed_float_option (a : _ @@ m), (b : _ @@ m) with
+    (match%optional.Packed_float_option (a : _ @ m), (b : _ @ m) with
      | Some a, Some b -> (Packed_float_option.some [@mode m]) (a +. b) [@nontail]
      | None, _ | _, None -> Packed_float_option.none)
     [@exclave_if_stack a]
