@@ -189,17 +189,16 @@ let rec rewrite_case
   =
   let get_scope i =
     (* Sadly, we need to be able to handle the case when the length of the matched
-       expression doesn't equal the length of the case, in order to produce useful
-       error messages (with the proper types). *)
+       expression doesn't equal the length of the case, in order to produce useful error
+       messages (with the proper types). *)
     if i < Array.length scope_array then scope_array.(i) else default_scope
   in
   let single_pattern ~ppat_desc ~bindings =
-    (* Merlin_helpers.hide_pattern: this overlaps with the pattern used
-       in the LHS of the bindings, but we don't want an error. Yet we also
-       don't want this to be a ghost location, because if the pattern is
-       ill-typed (e.g. too many patterns), we want the location to point
-       to the pattern. We hide this pattern, not the LHS of let-bindings, so
-       that merlin's go-to-definition works. *)
+    (* Merlin_helpers.hide_pattern: this overlaps with the pattern used in the LHS of the
+       bindings, but we don't want an error. Yet we also don't want this to be a ghost
+       location, because if the pattern is ill-typed (e.g. too many patterns), we want the
+       location to point to the pattern. We hide this pattern, not the LHS of
+       let-bindings, so that merlin's go-to-definition works. *)
     let pc_lhs = Merlin_helpers.hide_pattern { pat with ppat_desc } in
     let pc_rhs, pc_guard =
       match bindings with
@@ -208,8 +207,8 @@ let rec rewrite_case
         (* The bindings need to be in scope both in the guard and in the body. So we must
            bind the bindings in both. But we must be careful, because a variable might be
            used only in the guard or in the body, and we don't want spurious unused-var
-           warnings. We thus copy the guard into the body (to create one scope where all the
-           variable are used) and then ignore any unused-var warnings in the guard. *)
+           warnings. We thus copy the guard into the body (to create one scope where all
+           the variable are used) and then ignore any unused-var warnings in the guard. *)
         (match pc_guard with
          | None -> pexp_let ~loc Nonrecursive bindings body, None
          | Some guard_exp ->
@@ -230,8 +229,8 @@ let rec rewrite_case
                      Nonrecursive
                      (List.map ~f:ignore_pattern bindings)
                      guard_exp)) ))
-      (* ignore_pattern: we don't want merlin to see both the bindings in the guard and
-           in the case body *)
+      (* ignore_pattern: we don't want merlin to see both the bindings in the guard and in
+         the case body *)
     in
     [ { pc_lhs; pc_rhs; pc_guard } ]
   in
@@ -244,18 +243,18 @@ let rec rewrite_case
       x.txt
   | Ppat_or (pat1, pat2) ->
     (* Just turn disjunctions into a list of individual cases with identical rhs
-          expressions and guards. The OCaml manual explicitly says they are evaluated and
-          bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
+       expressions and guards. The OCaml manual explicitly says they are evaluated and
+       bound left-to-right: https://v2.ocaml.org/manual/patterns.html#sss:pat-or
 
-          If the rhs expression is a lot of code, this could potentially blow up binary size,
-          slow down compilation, and/or hurt performance due to cache locality. But we didn't
-          support or-patterns for a long time, so most code already just duplicates the rhs,
-          and this is much easier than generating an actual or-pattern with correct bindings.
-          We can implement that instead if the need arises in the future.
+       If the rhs expression is a lot of code, this could potentially blow up binary size,
+       slow down compilation, and/or hurt performance due to cache locality. But we didn't
+       support or-patterns for a long time, so most code already just duplicates the rhs,
+       and this is much easier than generating an actual or-pattern with correct bindings.
+       We can implement that instead if the need arises in the future.
 
-          If there is a [when]-guard, it is possible for it to be evaluated more times than
-          it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
-          "side-effecting guards" test in ../test/ppx_optional_test.ml for more.  *)
+       If there is a [when]-guard, it is possible for it to be evaluated more times than
+       it would be in the equivalent (i.e. "fake", not-ppxified) match statement; see the
+       "side-effecting guards" test in ../test/ppx_optional_test.ml for more. *)
     if unboxed
     then
       Location.raise_errorf
@@ -385,10 +384,10 @@ end
 let split_fake_alias_pattern lhs ((x, _) as alias) aliases =
   (* [ppat_loc_stack] represents relocations of a pattern by the parser, in particular due
      to nested parentheses. [ppat_loc] is the outermost span, and the stack is ordered
-     from outer to inner. [ppat_loc] and [ppat_loc_stack] can thus be viewed as a
-     nonempty stack. Here we take a list of locations ordered from inner to outer (i.e.
-     reversed) and push them down onto an existing nonempty stack. [merge] is used to
-     enforce constraints on the boundaries of the left and right patterns (see above). *)
+     from outer to inner. [ppat_loc] and [ppat_loc_stack] can thus be viewed as a nonempty
+     stack. Here we take a list of locations ordered from inner to outer (i.e. reversed)
+     and push them down onto an existing nonempty stack. [merge] is used to enforce
+     constraints on the boundaries of the left and right patterns (see above). *)
   let relocate_from_inner_to_outer locs loc loc_stack ~merge =
     List.fold locs ~init:(loc, loc_stack) ~f:(fun ((hd, tl) as acc) loc ->
       let loc =
@@ -599,7 +598,7 @@ let fake_match t =
       let fake_option =
         [%expr
           (* This code will never be executed, it is just here so the type checker
-              generates nice error messages. *)
+             generates nice error messages. *)
           if [%e eis_none ~loc ~scope_and_locality] [%e expr]
           then Stdlib.Option.None
           else Stdlib.Option.Some ([%e eunsafe_value ~loc ~scope_and_locality] [%e expr])]
@@ -636,8 +635,8 @@ let expand_match ~unboxed ~match_loc ~(module_ : longident loc option) matched_e
     then real_match ~loc ~unboxed t
     else (
       let fake_match =
-        (* The types in this branch actually match what the user would expect given the source
-           code, so we tell merlin to do all its work in here. *)
+        (* The types in this branch actually match what the user would expect given the
+           source code, so we tell merlin to do all its work in here. *)
         Merlin_helpers.focus_expression (fake_match t)
       in
       let real_match =
