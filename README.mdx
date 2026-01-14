@@ -100,7 +100,7 @@ includes an annotation `@@ local`, then the ppx calls into
 # let local_ f = Packed_float_option.some 7. in
   match%optional (f : Packed_float_option.t @ local) with
   | None -> Sexp.List []
-  | Some f -> f |> [%sexp_of_stack: float] |> Sexp.globalize
+  | Some f -> f |> ([%sexp_of: float] [@alloc stack]) |> Sexp.globalize
 - : Sexp.t = 7
 ```
 
@@ -118,6 +118,6 @@ val maybe_add :
   Packed_float_option.t -> Packed_float_option.t -> Packed_float_option.t =
   <fun>
 val maybe_add__stack :
-  local_ Packed_float_option.t ->
-  local_ Packed_float_option.t -> local_ Packed_float_option.t = <fun>
+  Packed_float_option.t @ local ->
+  Packed_float_option.t @ local -> Packed_float_option.t @ local = <fun>
 ```
